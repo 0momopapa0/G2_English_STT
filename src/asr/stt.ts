@@ -3,10 +3,19 @@ import { Transcript, type SttSnapshot } from './transcript.ts'
 export interface SttClient {
   sendPcm(chunk: Uint8Array): void
   clear(): void
-  close(): void
+  close(finalize?: boolean): Promise<boolean>
 }
 
-// Start the mic only after this promise resolves; never queue stale audio.
+function serviceError(code: number, type?: string): Error {
+  if (type === 'temp_api_key_session_expired' || code === 409) return new Error('Soniox 세션 시간이 끝났습니다. 시작을 눌러 다시 연결하세요.')
+  if (code === 401 || code === 403) return new Error('Soniox 인증 또는 권한 오류. API 키와 실시간 STT 권한을 확인하세요.')
+  if (code === 402) return new Error('Soniox 잔액 또는 월 사용 한도에 도달했습니다. 콘솔을 확인하세요.')
+  if (code === 429) return new Error('Soniox 연결 한도에 도달했습니다. 잠시 후 다시 시작하세요.')
+  return new Error('Soniox 음성 인식 오류 (' + code + '). 설정과 네트워크를 확인하고 다시 시작하세요.')
+}
+
+// Resolve only after a pong proves that Soniox accepted the configuration.
+// Never queue microphone audio while opening or silently retry a billable stream.
 export async function startSttStream(
   onSnapshot: (snap: SttSnapshot) => void,
   onError: (err: Error) => void,
@@ -14,26 +23,38 @@ export async function startSttStream(
 ): Promise<SttClient> {
   const endpoint = import.meta.env?.VITE_STT_TOKEN_URL || '/api/stt-token'
   const response = await fetch(endpoint, { method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]) })
-  const body = await response.json()
-  if (!response.ok) throw new Error(body.error || '음성 인식 인증 실패')
-  if (typeof body.access_token !== 'string') throw new Error('인증 서버 응답 오류')
+  let body
+  try { body = await response.json() }
+  catch { throw new Error('인증 서버가 JSON을 반환하지 않았습니다. 토큰 서버 주소와 실행 상태를 확인하세요.') }
+  if (!response.ok) throw new Error(typeof body?.error === 'string' ? body.error : 'Soniox 인증 실패')
+  if (typeof body?.api_key !== 'string' || !/^snx_temp_[A-Za-z0-9._-]+$/.test(body.api_key)) {
+    throw new Error('인증 서버가 Soniox 단기 API 키를 반환하지 않았습니다.')
+  }
   signal.throwIfAborted()
-  const params = new URLSearchParams({
-    model: 'nova-3', language: 'en', encoding: 'linear16', sample_rate: '16000',
-    channels: '1', interim_results: 'true', punctuate: 'true', smart_format: 'true',
-    endpointing: '400', mip_opt_out: 'true',
-  })
-  const socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${params}`, ['bearer', body.access_token])
+  const socket = new WebSocket('wss://stt-rt.soniox.com/transcribe-websocket', ['soniox-api-key', body.api_key])
   const transcript = new Transcript()
   let intentional = false
   let failed = false
+  let ready = false
+  let pingId = 0
+  let awaitingPong: number | undefined
   let heartbeat: ReturnType<typeof setInterval> | undefined
+  let pongTimer: ReturnType<typeof setTimeout> | undefined
+  let openingTimer: ReturnType<typeof setTimeout> | undefined
   let closeTimer: ReturnType<typeof setTimeout> | undefined
-  let opened = false
+  let closing: Promise<boolean> | undefined
+  let deliverFinal = false
+  let resolveClose: (completed: boolean) => void = () => {}
+  const completeClose = (completed: boolean) => {
+    clearTimeout(closeTimer)
+    resolveClose(completed)
+    socket.close()
+  }
   let rejectOpening: (error: Error) => void = () => {}
   const release = () => {
     clearInterval(heartbeat)
-    clearTimeout(closeTimer)
+    clearTimeout(pongTimer)
+    clearTimeout(openingTimer)
     signal.removeEventListener('abort', abort)
   }
   const fail = (error: Error) => {
@@ -41,7 +62,7 @@ export async function startSttStream(
     failed = true
     release()
     socket.close()
-    if (opened) onError(error)
+    if (ready) onError(error)
     else rejectOpening(error)
   }
   const abort = () => {
@@ -50,51 +71,94 @@ export async function startSttStream(
     socket.close()
     rejectOpening(new DOMException('연결 취소됨', 'AbortError'))
   }
+  const ping = () => {
+    if (awaitingPong !== undefined || socket.readyState !== WebSocket.OPEN) return
+    awaitingPong = ++pingId
+    try { socket.send(JSON.stringify({ type: 'ping', id: pingId })) }
+    catch { fail(new Error('Soniox 연결이 끊겼습니다. 시작을 눌러 다시 연결하세요.')); return }
+    pongTimer = setTimeout(() => fail(new Error('Soniox 응답이 멈췄습니다. 네트워크를 확인하고 다시 시작하세요.')), 10000)
+  }
   await new Promise<void>((resolve, reject) => {
     rejectOpening = reject
-    const timeout = setTimeout(() => fail(new Error('음성 인식 연결 시간 초과. 네트워크를 확인하세요.')), 12000)
-    socket.addEventListener('close', () => clearTimeout(timeout), { once: true })
+    openingTimer = setTimeout(() => fail(new Error('Soniox 연결 시간 초과. 네트워크를 확인하세요.')), 12000)
     socket.onopen = () => {
-      clearTimeout(timeout)
       if (signal.aborted || intentional) { abort(); return }
-      opened = true
-      heartbeat = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'KeepAlive' }))
-      }, 3000)
-      resolve()
+      try {
+        socket.send(JSON.stringify({
+          model: 'stt-rt-v6', audio_format: 'pcm_s16le', sample_rate: 16000, num_channels: 1,
+          language_hints: ['en'], language_hints_strict: true,
+          // Default semantic endpointing preserves time to revise accented speech.
+          enable_endpoint_detection: true,
+        }))
+        ping()
+      } catch { fail(new Error('Soniox 세션을 시작하지 못했습니다. 다시 연결하세요.')) }
     }
-    socket.onerror = () => fail(new Error('음성 인식 연결 실패. API 권한·잔액·인터넷을 확인하세요.'))
+    socket.onerror = () => fail(new Error('Soniox 연결 실패. 인터넷과 API 설정을 확인하세요.'))
     socket.onclose = () => {
       release()
-      if (!intentional) fail(new Error('음성 인식 연결이 종료됐습니다. 시작 버튼으로 다시 연결하세요.'))
+      clearTimeout(closeTimer)
+      if (intentional) resolveClose(false)
+      if (!intentional) fail(new Error('Soniox 연결이 종료됐습니다. 시작을 눌러 다시 연결하세요.'))
     }
     socket.onmessage = event => {
-      if (intentional || failed) return
+      // End-and-summarize drains final tokens; pause discards late captions.
+      if (failed) return
       try {
         const message = JSON.parse(String(event.data))
-        if (message.type === 'Error') { fail(new Error('음성 인식 서비스 오류. 설정을 확인하고 다시 시작하세요.')); return }
+        if (!message || typeof message !== 'object') throw new Error('Invalid response')
+        if (intentional) {
+          if (deliverFinal && ready && !message.error_code) {
+            const snapshot = transcript.accept(message)
+            if (snapshot) onSnapshot({ ...snapshot, finalDelta: transcript.takeFinalDelta() })
+          }
+          if (message.finished || message.error_code) completeClose(message.finished === true && !message.error_code)
+          return
+        }
+        if (typeof message.error_code === 'number') { fail(serviceError(message.error_code, message.error_type)); return }
+        if (message.type === 'pong' && message.id === awaitingPong) {
+          awaitingPong = undefined
+          clearTimeout(pongTimer)
+          if (!ready) {
+            ready = true
+            clearTimeout(openingTimer)
+            heartbeat = setInterval(ping, 5000)
+            resolve()
+          }
+          return
+        }
         const snapshot = transcript.accept(message)
-        if (snapshot) onSnapshot(snapshot)
-      } catch { fail(new Error('음성 인식 응답을 처리하지 못했습니다.')) }
+        if (snapshot && ready) onSnapshot({ ...snapshot, finalDelta: transcript.takeFinalDelta() })
+        if (message.finished) fail(new Error('Soniox 세션이 끝났습니다. 시작을 눌러 다시 연결하세요.'))
+      } catch {
+        if (intentional) completeClose(false)
+        else fail(new Error('Soniox 응답을 처리하지 못했습니다.'))
+      }
     }
     signal.addEventListener('abort', abort, { once: true })
     if (signal.aborted) abort()
   })
   return {
     sendPcm(chunk) {
-      if (intentional || failed || socket.readyState !== WebSocket.OPEN) return
-      if (socket.bufferedAmount > 64000) { fail(new Error('네트워크가 느려 자막이 지연됩니다. 다시 연결하세요.')); return }
-      socket.send(new Uint8Array(chunk))
+      if (intentional || failed || !ready || socket.readyState !== WebSocket.OPEN || !chunk.length) return
+      if (socket.bufferedAmount + chunk.byteLength > 64000) { fail(new Error('네트워크가 느려 자막이 지연됩니다. 다시 연결하세요.')); return }
+      try { socket.send(new Uint8Array(chunk)) }
+      catch { fail(new Error('음성 전송에 실패했습니다. 다시 연결하세요.')) }
     },
     clear() { transcript.clear(); onSnapshot(transcript.snapshot()) },
-    close() {
-      if (intentional) return
+    close(finalize = false) {
+      if (closing) return closing
+      if (intentional || failed) return Promise.resolve(false)
       intentional = true
+      deliverFinal = finalize
       release()
+      closing = new Promise(resolve => { resolveClose = resolve })
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'CloseStream' }))
-        closeTimer = setTimeout(() => socket.close(), 1000)
-      } else socket.close()
+        // Soniox ends a stream with an empty TEXT frame, not empty binary PCM.
+        closeTimer = setTimeout(() => completeClose(false), 2000)
+        try { socket.send('') }
+        catch { completeClose(false) }
+      } else completeClose(false)
+      return closing
     },
   }
 }

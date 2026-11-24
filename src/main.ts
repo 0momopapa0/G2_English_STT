@@ -5,7 +5,10 @@ import {
 import { startSttStream, type SttClient } from './asr/stt'
 import { RumbleFilter } from './asr/audio'
 import { tailAtWord } from './asr/transcript'
-import { mountUi, setStatus, setTranscript, setCaption, setControls, setLevel, filterEnabled } from './ui'
+import { Conversation } from './asr/conversation'
+import { summarizeLocally, type ConversationSummary } from './summary/summary'
+import { requestOpenAiSummary } from './summary/client'
+import { mountUi, setStatus, setTranscript, setCaption, setControls, setLevel, filterEnabled, setSummary, setSummaryStatus } from './ui'
 
 let bridge: EvenAppBridge | undefined
 let ready = false
@@ -24,6 +27,13 @@ let renderTimer: ReturnType<typeof setTimeout> | undefined
 let demoTimer: ReturnType<typeof setInterval> | undefined
 let unsubscribe = () => {}
 const filter = new RumbleFilter()
+const conversation = new Conversation()
+let ending = false
+let ended = false
+let summaryText = ''
+let summaryNotice = ''
+let summaryController: AbortController | undefined
+let summaryGeneration = 0
 
 // Preserve the actual operation queue after a UI timeout, avoiding concurrent BLE writes.
 let bridgeQueue: Promise<unknown> = Promise.resolve()
@@ -57,22 +67,24 @@ function display(text: string) {
 }
 function showTranscript() {
   setTranscript(finalText, interimText)
-  display(tailAtWord(`${finalText} ${interimText}`.trim(), 240) || (active ? 'Listening…' : 'Ready. Tap to start.'))
+  display(tailAtWord(`${finalText}${interimText}`.trim(), 240) || (active ? 'Listening…' : 'Ready. Tap to start.'))
 }
 function clearDemo() { clearInterval(demoTimer); demoTimer = undefined }
 
 async function stop(message = '일시정지 · 시작을 눌러 다시 연결하세요.') {
   generation++
+  ending = false
   active = false
   busy = false
+  // End the Soniox stream before aborting a pending connection.
+  void stt?.close()
+  stt = undefined
   controller?.abort()
   controller = undefined
-  stt?.close()
-  stt = undefined
   clearDemo()
   interimText = ''
   setLevel(0)
-  setControls(ready, false)
+  refreshControls()
   setStatus('paused', message)
   setTranscript(finalText, '')
   display(tailAtWord(finalText, 240) || 'Paused. Tap to resume.')
@@ -92,32 +104,43 @@ function handleError(error: unknown) {
 async function toggle() {
   if (!ready || disposed || busy) return
   if (active) { await stop(); return }
+  cancelSummary()
+  if (ended) {
+    conversation.clear()
+    finalText = ''; interimText = ''; sessionPrefix = ''
+    summaryText = ''; summaryNotice = ''; ended = false
+    setSummary(null)
+    setTranscript('', '')
+  }
+  conversation.startStream()
   clearDemo()
   busy = true
   const id = ++generation
   const abortController = new AbortController()
   controller = abortController
   sessionPrefix = finalText
-  setControls(true, false, true)
+  refreshControls()
   setStatus('connecting', '영어 음성 인식에 연결 중…')
   display('Connecting…')
   try {
     const client = await startSttStream(snapshot => {
       if (generation !== id || disposed) return
-      finalText = tailAtWord(`${sessionPrefix} ${snapshot.finalText}`.trim(), 4000)
+      finalText = tailAtWord(sessionPrefix ? `${sessionPrefix.trimEnd()} ${snapshot.finalText.trimStart()}` : snapshot.finalText, 4000)
+      if (snapshot.finalDelta) conversation.append(snapshot.finalDelta)
       interimText = snapshot.interimText
-      showTranscript()
+      if (ending) setTranscript(finalText, interimText)
+      else showTranscript()
     }, error => { if (generation === id) handleError(error) }, abortController.signal)
-    if (generation !== id || disposed) { client.close(); return }
+    if (generation !== id || disposed) { void client.close(); return }
     stt = client
     filter.reset()
     // Set before enabling capture so early audio callbacks are not discarded.
     active = true
     const ok = await bridgeCall(() => generation === id ? bridge!.audioControl(true) : Promise.resolve(false))
-    if (generation !== id || disposed) return
+    if (generation !== id || disposed || ending) return
     if (!ok) throw new Error('G2 마이크 권한 또는 연결을 확인하세요.')
     busy = false
-    setControls(true, true)
+    refreshControls()
     setStatus('listening', '듣는 중 · 영어 자막이 실시간으로 표시됩니다.')
     showTranscript()
   } catch (error) {
@@ -125,10 +148,16 @@ async function toggle() {
   }
 }
 function clear() {
+  if (ending) return
+  cancelSummary()
+  conversation.clear()
+  summaryText = ''; summaryNotice = ''; ended = false
+  setSummary(null)
   clearDemo()
   finalText = ''; interimText = ''; sessionPrefix = ''
   stt?.clear()
   showTranscript()
+  refreshControls()
 }
 function demo() {
   if (active || busy || disposed) return
@@ -138,12 +167,87 @@ function demo() {
   let index = 0
   demoTimer = setInterval(() => {
     interimText = words.slice(0, ++index).join(' ')
-    if (index === words.length) { finalText = interimText; interimText = ''; clearDemo() }
+    if (index === words.length) { finalText = interimText; interimText = ''; conversation.append(finalText); clearDemo(); refreshControls() }
     showTranscript()
   }, 220)
 }
 
-mountUi({ toggle: () => { void toggle().catch(handleError) }, clear, demo })
+
+function cancelSummary() {
+  summaryController?.abort()
+  summaryController = undefined
+  summaryGeneration++
+  setSummaryStatus('', false)
+}
+function refreshControls() {
+  setControls(ready, active, busy, !ended && (active || busy || Boolean(conversation.transcript)), ending)
+}
+function showSummaryOnGlasses(summary: ConversationSummary) {
+  display(('Summary\n' + summary.lensText).slice(0, 240))
+}
+async function finishConversation() {
+  if (disposed || ending || (!active && !busy && !conversation.transcript)) return
+  cancelSummary()
+  clearDemo()
+  ending = true
+  busy = true
+  active = false
+  const client = stt
+  stt = undefined
+  const id = client ? generation : ++generation
+  const closing = client?.close(true)
+  controller?.abort()
+  controller = undefined
+  setLevel(0)
+  refreshControls()
+  setStatus('connecting', '대화를 종료하고 마지막 자막을 정리하는 중…')
+  const results = await Promise.allSettled([
+    closing ?? Promise.resolve(true),
+    bridge ? bridgeCall(() => bridge!.audioControl(false)) : Promise.resolve(true),
+  ])
+  if (disposed || generation !== id) return
+  generation++
+  ending = false
+  busy = false
+  ended = true
+  interimText = ''
+  summaryText = conversation.transcript
+  finalText = tailAtWord(summaryText, 4000)
+  setTranscript(finalText, '')
+  const summary = summarizeLocally(summaryText)
+  summaryNotice = [
+    conversation.truncated ? '기록 한도를 넘어 최근 100,000자를 기준으로 요약했습니다.' : '',
+    results[0].status === 'rejected' || (results[0].status === 'fulfilled' && results[0].value !== true)
+      ? '마지막 발화가 완전히 확정되지 않았을 수 있습니다.' : '',
+    results[1].status === 'rejected' || (results[1].status === 'fulfilled' && results[1].value !== true)
+      ? 'G2 마이크 중지 응답을 확인하지 못했습니다. 연결을 확인하세요.' : '',
+  ].filter(Boolean).join(' ')
+  setSummary(summary, summaryText, summaryNotice)
+  refreshControls()
+  setStatus('paused', '대화 종료 · 무료 요약을 확인하거나 새 대화를 시작하세요.')
+  showSummaryOnGlasses(summary)
+}
+async function improveSummary() {
+  if (disposed || active || busy || !ended || !summaryText || summaryController) return
+  const controller = new AbortController()
+  summaryController = controller
+  const id = ++summaryGeneration
+  setSummaryStatus('대화 텍스트를 OpenAI로 보내 요약 중입니다…', true)
+  try {
+    const summary = await requestOpenAiSummary(summaryText, controller.signal)
+    if (disposed || id !== summaryGeneration) return
+    setSummary(summary, summaryText, summaryNotice)
+    setSummaryStatus('OpenAI 요약을 표시했습니다. 원문과 비교해 확인하세요.', false)
+    showSummaryOnGlasses(summary)
+  } catch (error) {
+    if (disposed || id !== summaryGeneration) return
+    setSummaryStatus(error instanceof Error ? error.message : 'OpenAI 요약에 실패했습니다. 무료 요약은 유지됩니다.', false)
+  } finally {
+    if (id === summaryGeneration) summaryController = undefined
+  }
+}
+
+mountUi({ toggle: () => { void toggle().catch(handleError) }, finish: () => { void finishConversation().catch(handleError) }, improveSummary: () => { void improveSummary() }, clear, demo })
 
 async function initialize() {
   const timeout = setTimeout(() => {
@@ -162,7 +266,7 @@ async function initialize() {
     if (created !== 0) throw new Error(`G2 화면 생성 실패: ${created}`)
     if (disposed) return
     ready = true
-    setControls(true, false)
+    refreshControls()
     setStatus('paused', '준비 완료 · 시작을 누르거나 안경을 한 번 터치하세요.')
     unsubscribe = bridge.onEvenHubEvent(event => {
       const pcm = event.audioEvent?.audioPcm
@@ -191,6 +295,7 @@ async function initialize() {
 function cleanup() {
   if (disposed) return
   disposed = true
+  cancelSummary()
   clearTimeout(renderTimer)
   clearDemo()
   unsubscribe()
