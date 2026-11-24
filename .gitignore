@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.npm-cache/
+
+# Local credentials and environment settings
+.env
+.env.*
+!.env.example
+
+# Local tooling and logs
+.aws/
+*.log
+*.ehpk
