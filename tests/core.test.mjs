@@ -3,33 +3,48 @@ import assert from 'node:assert/strict'
 import { Transcript, tailAtWord } from '../src/asr/transcript.ts'
 import { RumbleFilter } from '../src/asr/audio.ts'
 
-const result = (text, final = false, start = 0, duration = 1) => ({
-  type: 'Results', is_final: final, start, duration,
-  channel: { alternatives: [{ transcript: text }] },
-})
-test('interim revisions replace text; finals append once; stale results are ignored', () => {
+const token = (text, is_final = false) => ({ text, is_final })
+
+test('Soniox subwords, spaces and punctuation join exactly; interim revisions replace', () => {
   const transcript = new Transcript()
-  assert.equal(transcript.accept(result('Can you'))?.interimText, 'Can you')
-  assert.equal(transcript.accept(result('Could you'))?.interimText, 'Could you')
-  assert.deepEqual(transcript.accept(result('Could you?', true)), { finalText: 'Could you?', interimText: '' })
-  assert.equal(transcript.accept(result('Could you?', true)), null)
-  assert.equal(transcript.accept(result('old interim')), null)
-  assert.equal(transcript.accept(result('Confirm tomorrow.', true, 1))?.finalText, 'Could you? Confirm tomorrow.')
+  assert.equal(transcript.accept({ tokens: [token('Can'), token(' you')] })?.interimText, 'Can you')
+  assert.equal(transcript.accept({ tokens: [token('Could'), token(' you')] })?.interimText, 'Could you')
+  assert.deepEqual(transcript.accept({ tokens: [token('Could', true), token(' you'), token('?')] }), {
+    finalText: 'Could', interimText: ' you?',
+  })
+  assert.deepEqual(transcript.accept({ tokens: [token(' you', true), token('?', true), token(' Un'), token('believable')] }), {
+    finalText: 'Could you?', interimText: ' Unbelievable',
+  })
+  transcript.accept({ tokens: [token(' Un', true), token('believable', true), token('.', true)] })
+  assert.equal(transcript.snapshot().finalText, 'Could you? Unbelievable.')
+  // Repeated spoken words are legitimate, not duplicate result frames.
+  transcript.accept({ tokens: [token(' very', true), token(' very', true)] })
+  assert.match(transcript.snapshot().finalText, /very very$/)
 })
-test('silence clears interim and metadata cannot become captions', () => {
+
+test('empty token results clear interim; control/translation tokens and pong never become captions', () => {
   const transcript = new Transcript()
-  transcript.accept(result('uncertain'))
-  assert.equal(transcript.accept(result(''))?.interimText, '')
-  assert.equal(transcript.accept({ type: 'Metadata' }), null)
-  assert.equal(transcript.accept(result('', true))?.finalText, '')
+  transcript.accept({ tokens: [token('uncertain')] })
+  assert.equal(transcript.accept({ type: 'pong', id: 1 }), null)
+  assert.equal(transcript.snapshot().interimText, 'uncertain')
+  assert.equal(transcript.accept({ tokens: [] })?.interimText, '')
+  transcript.accept({ tokens: [
+    token('Hello.', true), token('<end>', true),
+    { ...token('안녕하세요', true), translation_status: 'translation' }, token('<fin>', true),
+    token('Next.', true),
+  ] })
+  assert.equal(transcript.snapshot().finalText, 'Hello.\nNext.')
 })
-test('clear retains timestamp watermark and transcript memory stays bounded', () => {
+
+test('clear resets captions and token-based transcript memory stays bounded', () => {
   const transcript = new Transcript()
-  transcript.accept(result('Old words.', true))
+  transcript.accept({ tokens: [token('Old words.', true), token('pending')] })
   transcript.clear()
-  assert.equal(transcript.accept(result('Old words.', true)), null)
-  for (let i = 1; i < 2000; i++) transcript.accept(result('New conversation sentence.', true, i))
+  assert.deepEqual(transcript.snapshot(), { finalText: '', interimText: '' })
+  for (let i = 0; i < 2000; i++) transcript.accept({ tokens: [token(' New conversation sentence.', true)] })
   assert.ok(transcript.snapshot().finalText.length <= 4000)
+  transcript.accept({ tokens: [token('word '.repeat(3000))] })
+  assert.ok(transcript.snapshot().interimText.length <= 4000)
   assert.equal(tailAtWord('hello world again', 12), 'world again')
   assert.equal(tailAtWord('hello world again', 11), 'world again')
   assert.equal(tailAtWord('hello world again', 10), 'again')

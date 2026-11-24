@@ -1,0 +1,73 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { UsageMeter, USAGE_KEY, formatDuration } from '../src/usage/meter.ts'
+
+function harness() {
+  let mono = 0, wall = new Date(2026, 10, 24, 12).getTime()
+  const data = new Map()
+  const port = { get: async key => data.get(key) ?? '', set: async (key, value) => { data.set(key, value); return true } }
+  const meter = new UsageMeter(() => mono, () => wall)
+  return { meter, data, port, advance(ms) { mono += ms; wall += ms }, setWall(ms) { wall = ms } }
+}
+test('usage counts accepted connection time including silence, excludes pause and persists daily totals/settings', async () => {
+  const h = harness()
+  await h.meter.load(h.port)
+  assert.deepEqual(h.meter.tick().settings, { sessionMinutes: 30, dailyMinutes: 60 })
+  h.advance(10000)
+  assert.equal(h.meter.tick().sessionMs, 0)
+  h.meter.start(); h.advance(12000); h.meter.stop()
+  h.advance(30000)
+  assert.equal(h.meter.tick().dailyMs, 12000)
+  h.meter.start(); h.advance(8000); h.meter.stop()
+  assert.equal(h.meter.tick().sessionMs, 20000)
+  await h.meter.configure({ sessionMinutes: 2, dailyMinutes: 3 })
+  const reopened = new UsageMeter(() => 0, () => new Date(2026, 10, 24, 12).getTime())
+  await reopened.load(h.port)
+  assert.equal(reopened.tick().dailyMs, 20000)
+  assert.deepEqual(reopened.tick().settings, { sessionMinutes: 2, dailyMinutes: 3 })
+})
+test('session limit survives restore; starting new conversation does not reset daily total', async () => {
+  const h = harness(); await h.meter.load(h.port)
+  await h.meter.configure({ sessionMinutes: 1, dailyMinutes: 2 })
+  h.meter.start(); h.advance(60000)
+  assert.equal(h.meter.tick().reason, 'session')
+  h.meter.stop()
+  assert.throws(() => h.meter.start(), /이 대화/)
+  h.meter.restoreSession(59000)
+  h.meter.start(); h.advance(1000); h.meter.stop()
+  assert.equal(h.meter.tick().reason, 'session')
+  h.meter.restoreSession()
+  h.meter.start(); h.advance(59000); h.meter.stop()
+  assert.equal(h.meter.tick().reason, 'daily')
+  assert.throws(() => h.meter.start(), /오늘/)
+})
+test('midnight resets daily allowance while preserving continuous conversation time; clock rollback grants no extra quota', async () => {
+  const h = harness()
+  h.setWall(new Date(2026, 10, 24, 23, 59, 59).getTime())
+  await h.meter.load(h.port)
+  h.meter.start(); h.advance(2000)
+  const view = h.meter.tick()
+  assert.equal(view.sessionMs, 2000)
+  assert.equal(view.dailyMs, 1000)
+  h.setWall(new Date(2026, 10, 24, 23).getTime())
+  h.advance(5000)
+  assert.equal(h.meter.tick().dailyMs, 6000)
+  h.meter.stop(); await h.meter.save()
+  assert.equal(JSON.parse(h.data.get(USAGE_KEY)).day, '2026-11-25')
+})
+test('usage rejects invalid settings, corrupted ledger and unsuccessful writes without silently resetting quota', async () => {
+  const h = harness(); await h.meter.load(h.port)
+  await assert.rejects(h.meter.configure({ sessionMinutes: 0, dailyMinutes: 60 }), /1~60/)
+  h.meter.start()
+  await assert.rejects(h.meter.configure({ sessionMinutes: 2, dailyMinutes: 60 }), /멈춘/)
+  h.meter.stop()
+  h.port.set = async () => false
+  await assert.rejects(h.meter.configure({ sessionMinutes: 2, dailyMinutes: 60 }), /저장/)
+  assert.equal(h.meter.tick().settings.sessionMinutes, 30)
+  const broken = new UsageMeter()
+  h.data.set(USAGE_KEY, '{"version":1,"dailyMs":-1}')
+  await assert.rejects(broken.load(h.port))
+  assert.equal(broken.tick().ready, false)
+  assert.throws(() => broken.start(), /준비/)
+  assert.equal(formatDuration(3661000), '61:01')
+})

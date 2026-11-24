@@ -1,2 +1,52 @@
 :root{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e7ece9;background:#141a17;color-scheme:dark;font-synthesis:none}
 *{box-sizing:border-box}body{margin:0}.panel{max-width:720px;margin:auto;padding:30px 22px 40px;display:grid;gap:22px}h1{font-size:36px;letter-spacing:-1.5px;margin:8px 0}header p{color:#a8b6ac;margin:0}.eyebrow{font-size:11px;font-weight:700;letter-spacing:2px;color:#8cae96}.status{font-size:14px;border-left:3px solid #85958a;background:#1e2822;padding:12px 14px;border-radius:4px}.status-listening{border-color:#91efac;color:#a4f2b9}.status-error{border-color:#ff9588;color:#ffb3a9}.glasses{background:#060a07;border:1px solid #344b3c;border-radius:18px;padding:22px;min-height:210px}.glasses .eyebrow{margin-bottom:18px}#caption{font-size:23px;line-height:1.55;color:#9df7ad;white-space:pre-wrap;overflow-wrap:anywhere;max-width:576px}.controls{display:flex;flex-wrap:wrap;gap:10px}button{font:inherit;cursor:pointer;border:0;border-radius:9px;padding:13px 20px;background:#abedba;color:#112619;font-weight:650}button.secondary{color:#dde9e0;background:#28352c}button:disabled{opacity:.45;cursor:default}button:focus-visible,input:focus-visible{outline:2px solid #bcfccc;outline-offset:4px}.filter,.level{font-size:14px;color:#bfcdc3;display:flex;align-items:center;gap:10px}.filter input{accent-color:#91efac;width:18px;height:18px}.level meter{width:150px}h2{font-size:13px;font-weight:500;color:#a8b6ac;margin:0 0 10px}.transcript{min-height:100px;max-height:240px;overflow:auto;border-top:1px solid #334138;padding-top:16px;font-size:18px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}#interim{color:#94a49a}footer{font-size:12px;color:#91a298;line-height:1.9}@media(max-width:400px){.panel{padding:22px 16px}button{padding:12px 14px}#caption{font-size:21px}}
+
+.summary{border:1px solid #405349;border-radius:16px;padding:20px;background:#1a241e;scroll-margin-top:20px}.summary[hidden]{display:none}.summary-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.summary-heading h2{font-size:20px;color:#edf5ef;margin:0}.badge{font-size:11px;border:1px solid #4c6654;border-radius:20px;padding:5px 9px;color:#bfe6c8}.summary p{font-size:14px;line-height:1.7}.summary h3{font-size:14px;color:#b8d4bf;margin:20px 0 8px}.summary ul{padding-left:22px;line-height:1.75;overflow-wrap:anywhere}.summary li+li{margin-top:8px}.summary .controls{margin-top:20px}.summary-help{color:#a9bab0}.summary-notice{color:#ffcf93}#summary-status{color:#c8dace;min-height:1em}details summary{cursor:pointer;font-size:14px;color:#b7cbbd}textarea{width:100%;min-height:180px;margin-top:12px;resize:vertical;padding:12px;border:1px solid #46594d;border-radius:8px;background:#101813;color:#dfece2;font:inherit;line-height:1.6}button,input{min-height:24px}@media(max-width:400px){.summary{padding:16px}}
+
+/* Browser-only preview of the exact text sent to the glasses. */
+body.glasses-preview{background:#050805}
+.glasses-preview .panel{max-width:672px;min-height:100dvh;align-content:center;gap:24px;padding:32px 24px}
+.glasses-preview .panel>header,.glasses-preview #status,.glasses-preview .filter,.glasses-preview .level,.glasses-preview #summary,.glasses-preview .panel>section:not(.glasses),.glasses-preview footer{display:none}
+.glasses-preview .glasses{container-type:inline-size;width:100%;aspect-ratio:2/1;min-height:0;padding:0;border:0;border-radius:0;background:#000;overflow:hidden}
+.glasses-preview .glasses>.eyebrow{display:none}
+.glasses-preview #caption{width:100%;height:100%;max-width:none;padding:1.388889cqw;font-family:Arial,sans-serif;font-size:3.819444cqw;font-weight:400;line-height:1.4;color:#82ff92;overflow:hidden;white-space:pre-wrap;overflow-wrap:break-word}
+.glasses-preview #toggle{display:none}
+.glasses-preview .controls{justify-content:center}
+.glasses-preview-note{color:#91a298;text-align:center;font-size:13px;line-height:1.8;margin:0}
+.glasses-preview-note a{color:#b3d9bd}
+
+.summary-choice{margin:24px 0;padding:20px;border:1px solid #526c59;border-radius:12px;background:#202e25}
+.summary-choice[hidden]{display:none}
+.summary-choice h3{margin:0;font-size:17px;color:#e4f3e8}
+.summary-choice p{color:#b4c7ba}
+.conversation-finished:not(.glasses-preview) .glasses,.conversation-finished #finish{display:none}
+.conversation-finished:not(.glasses-preview) .panel>.controls{order:1}
+.conversation-finished:not(.glasses-preview) .filter,.conversation-finished:not(.glasses-preview) .level{display:none}
+.glasses-preview.conversation-finished #summary{display:block;border:0;padding:0;background:transparent}
+.glasses-preview #summary>*:not(#summary-choice):not(#summary-status){display:none}
+.glasses-preview .summary-choice{text-align:center}
+
+.storage-status{margin:0;color:#a9c4b1;font-size:13px;line-height:1.7;overflow-wrap:anywhere}
+.recovery,.history{padding:20px;border:1px solid #405349;border-radius:14px;background:#19231d}
+.recovery[hidden],.history[hidden]{display:none}
+.recovery h2,.history h2{font-size:19px;color:#e5f0e8}
+.recovery p,.history p{font-size:13px;line-height:1.7;color:#b5c7bb}
+.history-row{padding:18px 0;border-top:1px solid #334a3a;margin-top:16px}
+.history-row h3{font-size:15px;line-height:1.6;overflow-wrap:anywhere;margin:0;color:#deeee2}
+.history-row button{font-size:13px;padding:10px 14px}
+#history-list{font-size:14px;color:#b5c7bb}
+#export-panel{scroll-margin-top:20px}
+#export-panel .controls{margin-top:14px}
+.glasses-preview .panel>#recovery:not([hidden]),.glasses-preview .panel>#export-panel:not([hidden]){display:block}
+.glasses-preview .panel>#history{display:block}
+.glasses-preview #summary>.controls{display:flex}
+
+.usage{border:1px solid #3d5946;padding:18px;border-radius:14px;background:#19251d}
+.usage-stats{display:flex;gap:18px;flex-wrap:wrap}
+.usage-stats>div{display:grid;gap:7px;flex:1;min-width:130px}
+.usage-stats span,.usage p{font-size:12px;line-height:1.7;color:#abc1b2}
+.usage-stats strong{font-size:20px;color:#b5f1c4;font-variant-numeric:tabular-nums}
+.usage details{margin-top:18px}.usage-settings{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-top:16px}
+.usage-settings label{display:grid;gap:8px;font-size:13px;color:#b7cbbb}
+.usage-settings input{width:130px;padding:10px;border:1px solid #4c6553;border-radius:6px;background:#111c15;color:#eef7f0;font:inherit}
+.glasses-preview .panel>#usage{display:block}
