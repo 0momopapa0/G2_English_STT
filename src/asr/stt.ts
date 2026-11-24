@@ -7,7 +7,7 @@ export interface SttClient {
 }
 
 function serviceError(code: number, type?: string): Error {
-  if (type === 'temp_api_key_session_expired' || code === 409) return new Error('Soniox 세션 시간이 끝났습니다. 시작을 눌러 다시 연결하세요.')
+  if (type === 'temp_api_key_session_expired' || code === 409) return Object.assign(new Error('Soniox 세션 시간이 끝났습니다. 시작을 눌러 다시 연결하세요.'), { sessionExpired: true })
   if (code === 401 || code === 403) return new Error('Soniox 인증 또는 권한 오류. API 키와 실시간 STT 권한을 확인하세요.')
   if (code === 402) return new Error('Soniox 잔액 또는 월 사용 한도에 도달했습니다. 콘솔을 확인하세요.')
   if (code === 429) return new Error('Soniox 연결 한도에 도달했습니다. 잠시 후 다시 시작하세요.')
@@ -20,9 +20,11 @@ export async function startSttStream(
   onSnapshot: (snap: SttSnapshot) => void,
   onError: (err: Error) => void,
   signal: AbortSignal,
+  maxDurationSeconds?: number,
 ): Promise<SttClient> {
   const endpoint = import.meta.env?.VITE_STT_TOKEN_URL || '/api/stt-token'
-  const response = await fetch(endpoint, { method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]) })
+  const tokenUrl = maxDurationSeconds === undefined ? endpoint : endpoint + (endpoint.includes('?') ? '&' : '?') + 'max_session_seconds=' + Math.max(1, Math.min(3600, Math.ceil(maxDurationSeconds)))
+  const response = await fetch(tokenUrl, { method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]) })
   let body
   try { body = await response.json() }
   catch { throw new Error('인증 서버가 JSON을 반환하지 않았습니다. 토큰 서버 주소와 실행 상태를 확인하세요.') }

@@ -17,11 +17,16 @@ export function tokenMiddleware(apiKey, fetchToken = fetch) {
     }
     if (Date.now() - windowStart > 60000) { windowStart = Date.now(); requests = 0 }
     if (++requests > 20) { reply(429, { error: '연결 요청이 많습니다. 잠시 후 다시 시작하세요.' }); return }
+    const duration = new URL(req.url, 'http://localhost').searchParams.get('max_session_seconds')
+    if (duration !== null && (!/^\d{1,4}$/.test(duration) || Number(duration) < 1 || Number(duration) > 3600)) {
+      reply(400, { error: '유효한 세션 제한 시간이 필요합니다.' }); return
+    }
+    const maxSessionSeconds = duration === null ? 3600 : Number(duration)
     if (!apiKey) { reply(503, { error: '.env.local에 SONIOX_API_KEY를 설정한 후 개발 서버를 다시 시작하세요.' }); return }
     try {
       const response = await fetchToken('https://api.soniox.com/v1/auth/temporary-api-key', {
         method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usage_type: 'transcribe_websocket', expires_in_seconds: 60, single_use: true, max_session_duration_seconds: 3600 }),
+        body: JSON.stringify({ usage_type: 'transcribe_websocket', expires_in_seconds: 60, single_use: true, max_session_duration_seconds: maxSessionSeconds }),
         signal: AbortSignal.timeout(10000),
       })
       if (!response.ok) {

@@ -63,3 +63,17 @@ test('provider errors are sanitized and requests are rate limited', async () => 
   for (let i = 1; i < 20; i++) await request(middleware)
   assert.equal((await request(middleware)).status, 429)
 })
+
+test('token requests enforce remaining session seconds and reject invalid values before provider call', async () => {
+  let calls = 0
+  const middleware = tokenMiddleware('server-secret', async (_url, options) => {
+    calls++
+    assert.equal(JSON.parse(options.body).max_session_duration_seconds, 17)
+    return { ok: true, json: async () => ({ api_key: 'snx_temp_limited', expires_at: '2030-01-01' }) }
+  })
+  assert.equal((await request(middleware, { url: '/api/stt-token?max_session_seconds=17' })).status, 200)
+  for (const duration of ['0', '3601', '-1', 'bad', '1.5']) {
+    assert.equal((await request(middleware, { url: '/api/stt-token?max_session_seconds=' + duration })).status, 400)
+  }
+  assert.equal(calls, 1)
+})
